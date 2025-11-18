@@ -1,0 +1,128 @@
+from fastapi import FastAPI, Depends, HTTPException, File, UploadFile, Form
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
+from typing import List, Optional
+import databases, sqlalchemy, uvicorn, jwt, passlib, os
+from datetime import datetime, timedelta
+from passlib.context import CryptContext
+import cloudinary
+import cloudinary.uploader
+
+# Cloudinary config (free tier) - tu apna daal lena baad mein
+cloudinary.config(
+    cloud_name="dx0wgr0q8",  # free account bana ke change kar dena
+    api_key="897733915267345",
+    api_secret="xxxxxxxxxxxxxxxxx"
+)
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./bhaikart.db")
+database = databases.Database(DATABASE_URL)
+metadata = sqlalchemy.MetaData()
+
+# Models
+users = sqlalchemy.Table("users", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("email", sqlalchemy.String, unique=True),
+    sqlalchemy.Column("hashed_password", sqlalchemy.String),
+    sqlalchemy.Column("is_admin", sqlalchemy.Boolean, default=False),
+)
+
+products = sqlalchemy.Table("products", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("name", sqlalchemy.String),
+    sqlalchemy.Column("description", sqlalchemy.String),
+    sqlalchemy.Column("price", sqlalchemy.Float),
+    sqlalchemy.Column("image_url", sqlalchemy.String),
+    sqlalchemy.Column("stock", sqlalchemy.Integer),
+    sqlalchemy.Column("category", sqlalchemy.String),
+)
+
+orders = sqlalchemy.Table("orders", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("user_id", sqlalchemy.Integer),
+    sqlalchemy.Column("total", sqlalchemy.Float),
+    sqlalchemy.Column("status", sqlalchemy.String, default="pending"),
+    sqlalchemy.Column("created_at", sqlalchemy.DateTime, default=datetime.utcnow),
+)
+
+order_items = sqlalchemy.Table("order_items", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("order_id", sqlalchemy.Integer),
+    sqlalchemy.Column("product_id", sqlalchemy.Integer),
+    sqlalchemy.Column("quantity", sqlalchemy.Integer),
+    sqlalchemy.Column("price", sqlalchemy.Float),
+)
+
+cart = sqlalchemy.Table("cart", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("user_id", sqlalchemy.Integer),
+    sqlalchemy.Column("product_id", sqlalchemy.Integer),
+    sqlalchemy.Column("quantity", sqlalchemy.Integer),
+)
+
+engine = sqlalchemy.create_engine(DATABASE_URL)
+metadata.create_all(engine)
+
+app = FastAPI(title="BhaiKart India")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+class UserCreate(BaseModel):
+    email: str
+    password: str
+
+class ProductCreate(BaseModel):
+    name: str
+    description: str
+    price: float
+    stock: int
+    category: str
+
+class Product(ProductCreate):
+    id: int
+    image_url: str
+
+# JWT
+SECRET_KEY = "bhai_ka_secret_key_change_kar_dena"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+# Routes (sirf important wale abhi, baaki next message mein)
+@app.post("/register")
+async def register(user: UserCreate):
+    query = users.insert().values(
+        email=user.email,
+        hashed_password=pwd_context.hash(user.password),
+        is_admin=False if "@admin" not in user.email else True
+    )
+    try:
+        user_id = await database.execute(query)
+        token = create_access_token({"sub": user.email})
+        return {"access_token": token, "token_type": "bearer"}
+    except:
+        raise HTTPException(400, "Email already exists")
+
+@app.post("/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    query = users.select().where(users.c.email == form_data.username)
+    user = await database.fetch_one(query)
+    if not user or not pwd_context.verify(form_data.password, user.hashed_password):
+        raise HTTPException(401, "Invalid credentials")
+    token = create_access_token({"sub": user.email})
+    return {"access_token": token, "token_type": "bearer"}
