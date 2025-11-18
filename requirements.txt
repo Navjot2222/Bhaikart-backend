@@ -6,3 +6,4 @@ PyJWT
 passlib[bcrypt]
 cloudinary
 python-dotenv
+gunicorn
